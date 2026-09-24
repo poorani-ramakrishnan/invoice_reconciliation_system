@@ -65,4 +65,16 @@ if st.button("Run Three-Way Match"):
             st.write(data["result"])
 
         except requests.RequestException as error:
-            st.error(f"Could not connect to FastAPI: {error}")
+            detail = ""
+            if error.response is not None:
+                try:
+                    detail = error.response.json().get("detail", "")
+                except ValueError:
+                    detail = error.response.text
+
+            if error.response is not None and error.response.status_code == 503:
+                st.warning(
+                    "The vision model is temporarily busy. Please wait a moment and try again."
+                )
+            else:
+                st.error(f"FastAPI request failed: {detail or error}")

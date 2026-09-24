@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 from dotenv import load_dotenv
 from google import genai
@@ -8,8 +9,49 @@ from google.genai import types
 env_path = Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
-# Current Flash model available to the Gemini API account.
-MODEL_NAME = "gemini-3.5-flash"
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.8-flash")
+MAX_RETRIES = 3
+
+
+class GeminiUnavailableError(RuntimeError):
+    """Raised when all configured Gemini models are temporarily unavailable."""
+
+
+def _generate_with_retries(client: genai.Client, contents: list[object]) -> str:
+    """Retry temporary capacity/rate-limit failures, then try the fallback model."""
+    models = [MODEL_NAME]
+    if FALLBACK_MODEL and FALLBACK_MODEL != MODEL_NAME:
+        models.append(FALLBACK_MODEL)
+
+    last_error: Exception | None = None
+    for model in models:
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                )
+                if not response.text:
+                    raise RuntimeError(f"Gemini returned an empty response using {model}.")
+                return response.text
+            except Exception as error:
+                last_error = error
+                status_code = getattr(error, "status_code", None)
+                error_text = str(error).upper()
+                is_transient = status_code in {429, 500, 502, 503, 504}
+                is_transient = is_transient or any(
+                    marker in error_text for marker in ("429", "500", "502", "503", "504", "UNAVAILABLE")
+                )
+                if not is_transient:
+                    raise
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(2**attempt)
+
+    raise GeminiUnavailableError(
+        "Gemini models are temporarily unavailable. "
+        "Please wait a moment and try again."
+    ) from last_error
 
 
 def analyze_documents(
@@ -77,9 +119,4 @@ RECOMMENDED ACTION:
         invoice_part,
     ]
 
-    response = client.models.generate_content(
-        model=MODEL_NAME,
-        contents=contents,
-    )
-
-    return response.text
+    return _generate_with_retries(client, contents)
